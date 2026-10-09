@@ -2,6 +2,9 @@
 
 An intelligent, RAG-powered (Retrieval-Augmented Generation) Streamlit application that provides instant, accurate answers to student questions regarding admissions, fees, examinations, campus rules, scholarships, and academic circulars based on official college documents.
 
+**Domain:** GenAI
+**Team Lead:** Guthula Likhith & Badrinadh
+
 ---
 
 ## 🚀 Key Architecture & Features
