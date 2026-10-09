@@ -36,12 +36,21 @@ st.markdown("""
         margin-bottom: 8px;
     }
     .source-box {
-        background-color: #F3F4F6;
+        background-color: #F8FAFC;
         border-left: 4px solid #3B82F6;
-        padding: 8px 12px;
+        padding: 10px 14px;
         margin-top: 8px;
-        border-radius: 4px;
-        font-size: 0.88rem;
+        border-radius: 6px;
+        font-size: 0.9rem;
+    }
+    .badge-info {
+        display: inline-block;
+        background-color: #EFF6FF;
+        color: #1D4ED8;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.8rem;
+        font-weight: 600;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -67,22 +76,28 @@ def get_hf_token():
 # ============================================================
 # RESOURCE CACHING (Embeddings & Vector Database)
 # ============================================================
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
 @st.cache_resource(show_spinner="Loading embedding model...")
 def get_embeddings():
     return HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+        model_name=EMBEDDING_MODEL_NAME
     )
 
 @st.cache_resource(show_spinner="Initializing College Knowledge Base...")
 def load_vectorstore(_embeddings):
     vector_db_path = "vector_db"
     
+    # Try loading existing FAISS index
     if os.path.exists(vector_db_path) and os.path.exists(os.path.join(vector_db_path, "index.faiss")):
-        return FAISS.load_local(
-            vector_db_path,
-            _embeddings,
-            allow_dangerous_deserialization=True
-        )
+        try:
+            return FAISS.load_local(
+                vector_db_path,
+                _embeddings,
+                allow_dangerous_deserialization=True
+            )
+        except Exception as e:
+            st.warning(f"Could not load pre-built index, rebuilding from PDFs: {e}")
     
     # Otherwise build from knowledge PDFs
     pdf_files = [
@@ -115,6 +130,7 @@ def load_vectorstore(_embeddings):
     vectorstore = FAISS.from_documents(chunks, _embeddings)
     
     try:
+        os.makedirs(vector_db_path, exist_ok=True)
         vectorstore.save_local(vector_db_path)
     except Exception:
         pass
@@ -125,19 +141,28 @@ def load_vectorstore(_embeddings):
 # ============================================================
 # LLM INFERENCE
 # ============================================================
-def ask_ai(client, question: str, context: str, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-    prompt = f"""You are a College Helpdesk Assistant.
+# Available chat models for Hugging Face Inference Providers
+CHAT_MODELS = [
+    "Qwen/Qwen2.5-72B-Instruct",
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "mistralai/Mistral-7B-Instruct-v0.3",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+    "google/gemma-2-2b-it"
+]
 
-Answer the student's question ONLY using the information provided in the college documents below.
+def ask_ai(client: InferenceClient, question: str, context: str, model_name: str):
+    prompt = f"""You are an official College Helpdesk Assistant.
+
+Answer the student's question accurately and clearly using ONLY the information provided in the college documents below.
 
 Rules:
 1. Use only the provided context.
-2. Do not use outside knowledge.
-3. Do not invent information.
-4. Give simple, clear, and structured answers.
-5. If the answer is not available in the documents, say:
+2. Do not invent or assume information.
+3. Give simple, clear, bulleted or structured answers where appropriate.
+4. If the answer is not found in the documents, state:
 "Sorry, I couldn't find this information in the official college documents."
-6. Keep the answer directly related to the student's question.
+5. Keep the answer concise and student-friendly.
 
 College Documents Context:
 {context}
@@ -147,15 +172,35 @@ Student Question:
 
 Answer:"""
 
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=600,
-        temperature=0.2
-    )
-    return response.choices[0].message.content
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=600,
+            temperature=0.2
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        error_msg = str(e)
+        # Check if error is due to credit limit or model routing
+        if "402" in error_msg or "Payment Required" in error_msg or "credits" in error_msg.lower():
+            # Graceful RAG extraction fallback if HF Inference Provider credits are exhausted
+            fallback_answer = format_rag_fallback(question, context)
+            return fallback_answer
+        raise e
+
+def format_rag_fallback(question: str, context: str) -> str:
+    """Fallback generator when external LLM API credits are unavailable."""
+    return f"""### 📋 Official College Handbook Information
+
+Based on the official college documents, here is the relevant information retrieved for your query:
+
+{context}
+
+---
+*💡 Note: Generated via direct College Knowledge Base Retrieval.*"""
 
 
 # ============================================================
@@ -167,16 +212,32 @@ with st.sidebar:
     st.markdown("Your 24/7 AI-powered assistant for academic, admission, fee, and campus queries.")
     st.divider()
     
+    # Token Authentication
     hf_token = get_hf_token()
     if not hf_token:
         st.warning("⚠️ Hugging Face Token required")
-        user_input_token = st.text_input("Enter HF Token:", type="password", help="Add HF_TOKEN in .env or Streamlit Secrets")
+        user_input_token = st.text_input(
+            "Enter HF Token:", 
+            type="password", 
+            help="Add HF_TOKEN in .env or Streamlit Secrets"
+        )
         if user_input_token:
             st.session_state["custom_hf_token"] = user_input_token
             st.rerun()
     else:
-        st.success("✅ Connected to Hugging Face")
-        
+        st.success("✅ Hugging Face Connected")
+
+    st.markdown("### ⚙️ Model Settings")
+    st.caption(f"**Embedding Model:** `{EMBEDDING_MODEL_NAME}`")
+    
+    selected_llm = st.selectbox(
+        "Chat LLM Model:",
+        options=CHAT_MODELS,
+        index=0,
+        help="Select the generation model hosted on Hugging Face Inference Providers"
+    )
+
+    st.divider()
     st.markdown("### 📌 Common Questions")
     sample_queries = [
         "What is the fee structure for this academic year?",
@@ -192,7 +253,6 @@ with st.sidebar:
             st.session_state["selected_query"] = query
 
     st.divider()
-    
     st.markdown("### 📚 Knowledge Base Documents")
     st.markdown("""
     - *01_college_handbook.pdf*
@@ -281,8 +341,8 @@ if prompt_input:
                                 displayed.add(src_label)
                                 
                         # Call Hugging Face API
-                        client = InferenceClient(provider="auto", token=current_token)
-                        answer = ask_ai(client, prompt_input, context)
+                        client = InferenceClient(api_key=current_token)
+                        answer = ask_ai(client, prompt_input, context, model_name=selected_llm)
                         
                         st.write(answer)
                         if sources:
