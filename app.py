@@ -125,7 +125,7 @@ def load_vectorstore(_embeddings):
 # ============================================================
 # LLM INFERENCE
 # ============================================================
-def ask_ai(client, question: str, context: str, model_name: str = "openai/gpt-oss-120b"):
+def ask_ai(client, question: str, context: str, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
     prompt = f"""You are a College Helpdesk Assistant.
 
 Answer the student's question ONLY using the information provided in the college documents below.
